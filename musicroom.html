@@ -1,0 +1,270 @@
+<html>
+<head>
+<style>
+    #drop_zone {
+        border: 5px solid blue;
+        width:  200px;
+        height: 100px;
+    }
+</style>
+</head>
+<body>
+<audio id="my-audio" controls></audio>
+<div id="drop_zone" ondrop="event.preventDefault()" ondragover="dragOverHandler(event);">
+<p>Drag one or more files to this Drop Zone ...</p>
+</div>
+<script>
+
+function detectMime(arrBuf) {
+    let mimes = ['audio/wav', 'audio/mpeg', 'audio/mp4', 'audio/aac',
+     'audio/aacp', 'audio/ogg', 'audio/webm', 'audio/ogg', 'audio/webm',
+     'audio/flac', 'audio/ogg']
+
+
+    for (let i = 0; i < mimes.length; i++) {
+        mediaSrc = new MediaSource();
+        try {
+            audioSrcBuf = myMediaSource.addSourceBuffer(mimes[i]);
+            audioSrcBuf.appendBuffer(arrBuf);
+            return mimes[i];
+        } catch (err) {
+            console.log(err);
+        }
+    }
+
+    throw "can't detect mime"
+}
+
+class AudioPlayer {
+    constructor(audioTag) {
+        this.audioTag = audioTag;
+        this.arrBufQueue = [];
+        this.updating = false;
+        this.promises = [];
+        this.moreOffset = 5; // seconds
+
+        // creating the MediaSource, just with the "new" keyword, and the URL for it
+        this.mediaSrc = new MediaSource();
+
+        // attaching the MediaSource to the audio tag
+        audioTag.src = URL.createObjectURL(this.mediaSrc);
+
+        audioTag.addEventListener("timeupdate", (ev) => {
+            this._timeUpdate();
+        })
+
+        this.mediaSrc.addEventListener('sourceopen', (_) => {
+            this.audioSrcBuf = this.mediaSrc.addSourceBuffer('audio/mpeg');
+            this.audioSrcBuf.addEventListener('updateend', (_) => {this._readyToAppend()}, false);
+            this._readyToAppend();
+        });
+    }
+
+    pushBuffer(arrBuf) {
+        console.log(arrBuf);
+        if (!(arrBuf instanceof ArrayBuffer)) {
+            throw "expected arrBuf to be ArrayBuffer";
+        }
+        if (this.updating || !this.audioSrcBuf) {
+            this.arrBufQueue.push(arrBuf)
+        } else {
+            this.audioSrcBuf.appendBuffer(arrBuf);
+            this.updating = true;
+        }
+    }
+
+    wantMore() {
+        return new Promise((resolve, reject) => {
+            if (this.resolveMore) {
+                throw "wantMore called more than once at the same time";
+            }
+            this.resolveMore = resolve;
+        });
+    }
+
+    play() {
+        this.audioTag.play();
+    }
+
+    _readyToAppend() {        
+        if (this.arrBufQueue.length) {
+            this.audioSrcBuf.appendBuffer(this.arrBufQueue.shift());
+            this.updating = true;
+        } else {
+            this.updating = false;
+        }
+    }
+
+    _timeUpdate() {
+        console.log(this.audioTag.currentTime, this.audioSrcBuf.timestampOffset)
+        if (this.audioTag.currentTime + this.moreOffset >= this.audioSrcBuf.timestampOffset) {
+            if (this.resolveMore) {
+                this.resolveMore()
+                this.resolveMore = null;
+            }
+        }
+    }
+}
+
+
+const audioTag = document.getElementById("my-audio");
+const player = new AudioPlayer(audioTag);
+
+document.getElementById("drop_zone").addEventListener('drop', (ev) => {
+  // Prevent file from being opened
+  ev.preventDefault();
+
+  console.log('File(s) dropped', ev.dataTransfer.items.length);
+
+  if (ev.dataTransfer.items) {
+    // Use DataTransferItemList interface to access the file(s)
+    for (var i = 0; i < ev.dataTransfer.items.length; i++) {
+      // If dropped items aren't files, reject them
+      if (ev.dataTransfer.items[i].kind === 'file') {
+        var file = ev.dataTransfer.items[i].getAsFile();
+        console.log('... file[' + i + '].name = ' + file.name);
+        doFile(file);
+      }
+    }
+  } else {
+    // Use DataTransfer interface to access the file(s)
+    for (var i = 0; i < ev.dataTransfer.files.length; i++) {
+      console.log('... file[' + i + '].name = ' + ev.dataTransfer.files[i].name);
+      doFile(ev.dataTransfer.files[i]);
+    }
+  }
+});
+
+function doFile(file) {
+    const writableStream = new WritableStream({
+        write(chunk) {
+            async function pushBuffers() {
+                for (let i = 0; i < chunk.buffer.byteLength; i += 16000) {
+                    let slice = chunk.slice(i, i+16000);
+                    player.pushBuffer(slice.buffer);
+                    player.play();
+
+                    socket.send(formatPsycho("music", slice))
+                    console.log(slice.buffer);
+
+                    await player.wantMore();
+                }
+            }
+
+            return pushBuffers();
+        },
+        close() {
+            console.log("stream closed?")
+        },
+        abort(err) {
+            console.log("Sink error:", err);
+        }
+    }, new CountQueuingStrategy({ highWaterMark: 10 }));
+
+    file.stream().pipeTo(writableStream).catch(console.error);
+}
+
+function dragOverHandler(ev) {
+  console.log('File(s) in drop zone'); 
+
+  // Prevent file from being opened
+  ev.preventDefault();
+}
+
+
+// Create WebSocket connection.
+const socket = new WebSocket('ws://localhost:1960/psycho');
+socket.binaryType = "arraybuffer";
+
+var open = false;
+let id = Math.random().toString(16).substring(2, 8);
+
+// Connection opened
+socket.addEventListener('open', function (event) {
+    open = true;
+    socket.send('SUB music\n');
+});
+
+// Listen for messages
+socket.addEventListener('message', function (event) {
+    console.log("RECEIVED", event);
+    let msg = parsePsycho(event.data);
+
+    switch (msg.opType) {
+    case "INFO":
+        console.log("INFO", msg.info);
+        break;
+    case "MSG":
+        player.pushBuffer(msg.payload.buffer);
+        player.play();
+        break;
+    }
+});
+
+socket.addEventListener('error', function (event) {
+    console.log('Error from server ', event);
+});
+
+socket.addEventListener('close', function (event) {
+    open = false;
+    console.log('Connection closed');
+});
+
+function parsePsycho(data) {
+    console.log(data);
+    if (typeof data == "string") {
+        data = Uint8Array.from(data, x => x.charCodeAt(0))
+    } else if (data instanceof ArrayBuffer) {
+        data = new Uint8Array(data);
+    } else if (!(data instanceof Uint8Array)) {
+        throw "data is not Uint8Array"
+    }
+
+    let dec = new TextDecoder("utf-8");
+
+    console.log(data)
+    if (dec.decode(data.slice(0, 4)) == "-ERR") {
+        return {opType: "-ERR", error: data.slice(5)};
+    }
+
+    let i = data.indexOf(10); // "\n"
+    let j = data.indexOf(32); // " "
+    let opType = dec.decode(data.slice(0, j));
+
+    if (opType == "INFO") {
+        return {opType: "INFO", info: JSON.parse(dec.decode(data.slice(j+1,i)))}
+    }
+
+    let tokens = dec.decode(data.slice(0, i)).split(" ");
+    let payload = data.slice(i+1, -1);
+    if (tokens[0] != "MSG") {
+        throw "not a MSG type message"
+    }
+    console.log(i, dec.decode(data.slice(0, i)));
+    console.log(tokens[2], payload.length, payload.byteLength);
+    if (tokens[2] != payload.length && tokens[2] != payload.byteLength) {
+        throw "payload length doesn't match"
+    }
+    return {opType: "MSG", subject: tokens[1], payload: payload};
+}
+
+function formatPsycho(subject, payload) {
+    if (!(payload instanceof Uint8Array)) {
+        throw "expected payload to be Uint8Array"
+    }
+
+    var enc = new TextEncoder();
+    let header = enc.encode("PUB " + subject + " " + payload.byteLength + "\n");
+    var both = new Uint8Array(header.byteLength + payload.byteLength + 1);
+    both.set(header, 0);
+    both.set(payload, header.byteLength);
+    both[both.byteLength-1] = header[header.byteLength-1];
+
+    console.log("format both", both);
+
+    return both;
+}
+
+</script>
+</body>
+</html>

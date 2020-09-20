@@ -1,0 +1,133 @@
+<html>
+<head>
+    <style>
+        body {
+            background-color: 0;
+        }
+        .circle {
+            height: 10px;
+            width: 10px;
+            background-color: #ffffff;
+            position: absolute;
+        }
+    </style>
+</head>
+<body>
+<script>
+// Create WebSocket connection.
+const socket = new WebSocket('ws://localhost:1960/psycho');
+
+var open = false;
+let id = Math.random().toString(16).substring(2, 8);
+let circles = {};
+let circleTrack = {};
+let myPos = {left: 0, top: 0};
+
+// Connection opened
+socket.addEventListener('open', function (event) {
+    open = true;
+    socket.send('SUB mouseparty\n');
+});
+
+function handleMsg(payload) {
+    let tokens = payload.split(" ")
+    let id = tokens[0];
+    let x = tokens[1];
+    let y = tokens[2];
+
+    if (!(id in circles)) {
+        let c = document.createElement("div");
+        c.classList.add("circle")
+        c.style.backgroundColor = "#" + id;
+        circles[id] = c;
+        document.body.appendChild(c);
+    }
+    let c = circles[id];
+
+    c.style.left = x;
+    c.style.top = y;
+
+    circleTrack[id] = null;
+}
+
+// Listen for messages
+socket.addEventListener('message', function (event) {
+    let msg = parsePsycho(event.data);
+
+    switch (msg.opType) {
+    case "INFO":
+        console.log("INFO", msg.info);
+        break;
+    case "MSG":
+        handleMsg(msg.payload);
+        break;
+    }
+});
+
+socket.addEventListener('error', function (event) {
+    console.log('Error from server ', event);
+});
+
+socket.addEventListener('close', function (event) {
+    open = false;
+    console.log('Connection closed');
+});
+
+function updateDisplay(event) {
+  myPos.left = event.pageX;
+  myPos.top = event.pageY;
+  sendMyPos();
+}
+
+function sendMyPos() {
+    if (open) {
+        let msg = id + " " + myPos.left + " " + myPos.top;
+        socket.send("PUB mouseparty " + msg.length + "\n" + msg + "\n");
+    }
+}
+
+function parsePsycho(data) {
+    let i = data.indexOf("\n");
+    let j = data.indexOf(" ");
+    let opType = data.slice(0, j);
+
+    if (opType == "INFO") {
+        return {opType: "INFO", info: JSON.parse(data.slice(j+1,i))}
+    }
+
+    let tokens = data.slice(0, i).split(" ");
+    let payload = data.slice(i+1, -1);
+    if (tokens[0] != "MSG") {
+        throw "not a MSG type message"
+    }
+    if (tokens[2] != payload.length) {
+        throw "payload length doesn't match"
+    }
+    return {opType: "MSG", subject: tokens[1], payload: payload};
+}
+
+function formatPsycho(subject, payload) {
+    socket.send("PUB " + subject + " " + payload.length + "\n" + payload + "\n");
+}
+
+document.addEventListener("mousemove", updateDisplay, false);
+
+function longTicker() {
+    for (const id in circles) {
+        if (!(id in circleTrack)) {
+            removeCircle(id);
+        }
+    }
+    circleTrack = {};
+}
+
+function removeCircle(id) {
+    document.body.removeChild(circles[id]);
+    delete(circles[id]);
+}
+
+setInterval(sendMyPos, 500);
+setInterval(longTicker, 1000);
+</script>
+</body>
+</html>

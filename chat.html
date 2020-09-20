@@ -1,0 +1,101 @@
+<html>
+<head>
+    <style>
+    </style>
+</head>
+<body>
+<div id="content">
+</div>
+<input id="input"></input>
+<script>
+// Create WebSocket connection.
+const socket = new WebSocket('ws://localhost:1960/psycho');
+
+var open = false;
+let id = Math.random().toString(16).substring(2, 8);
+let input = document.getElementById("input");
+let content = document.getElementById("content");
+
+// Connection opened
+socket.addEventListener('open', function (event) {
+    open = true;
+    socket.send('SUB chat\n');
+});
+
+input.addEventListener("keypress", function(event) {
+    if (event.key == "Enter") {
+        enter(input.value);
+    }
+});
+
+function enter(text) {
+    let line = "<" + id + "> " + text;
+    if (open) {
+        socket.send(formatPsycho('chat', line));
+        appendLine(line);
+        input.value = "";
+    }
+}
+
+function appendLine(line) {
+    content.innerText = content.innerText + line + '\n';
+}
+
+// Listen for messages
+socket.addEventListener('message', function (event) {
+    console.log(event.data);
+    let msg = parsePsycho(event.data);
+
+    switch (msg.opType) {
+    case "INFO":
+        console.log("INFO", msg.info);
+        break;
+    case "MSG":
+        appendLine(msg.payload);
+        break;
+    }
+});
+
+socket.addEventListener('error', function (event) {
+    console.log('Error from server ', event);
+});
+
+socket.addEventListener('close', function (event) {
+    open = false;
+    console.log('Connection closed');
+});
+
+function parsePsycho(data) {
+    if (data.slice(0, 4) == "-ERR") {
+        return {opType: "-ERR", error: data.slice(5)};
+    }
+
+    let i = data.indexOf("\n");
+    let j = data.indexOf(" ");
+    let opType = data.slice(0, j);
+
+    if (opType == "INFO") {
+        return {opType: "INFO", info: JSON.parse(data.slice(j+1,i))}
+    }
+
+    let tokens = data.slice(0, i).split(" ");
+    let payload = data.slice(i+1, -1);
+    if (tokens[0] != "MSG") {
+        throw "not a MSG type message"
+    }
+    if (tokens[2] != payload.length) {
+        throw "payload length doesn't match"
+    }
+    return {opType: "MSG", subject: tokens[1], payload: payload};
+}
+
+function formatPsycho(subject, payload) {
+    if (payload == undefined) {
+        return;
+    }
+    return "PUB " + subject + " " + payload.length + "\n" + payload + "\n";
+}
+
+</script>
+</body>
+</html>
